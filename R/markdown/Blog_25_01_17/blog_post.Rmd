@@ -1,0 +1,116 @@
+--
+title: "Visualising the funding circle loanbook"
+output:
+  html_document:
+    keep_md: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We are again looking at the the peer to peer loan (P2P) book for funding circle (FC), with the focus being the variation in return based on portfolio composition and diversification. FC states that the average return on investment is [7.1%](https://www.fundingcircle.com/uk/statistics/),  with 93% of investors that invested in more than 100 companies, with a maximum exposure of 1% earning 5% or more.  
+
+
+As previously we load the required packages, and the funding circle loan book. 
+
+```{r packages, include=FALSE}
+#install.packages('tidyverse')
+library(tidyverse)
+
+#install.packages('lubridate')
+library(lubridate)
+
+#install.packages('stargazer')
+library(stargazer)
+```
+
+
+
+```{r load loanbook, include=FALSE}
+## File path of loanbook 
+df_path  <- '~/data/Funding_circle/loanbook.csv'
+
+## Load data with miss spec as N/A
+loanbook <- read_csv(df_path, na='N/A')
+
+## var to factors
+factor_list <- c('status', 'credit_band', 'loan_purpose', 'sector', 'business_type_name', 'region_name', 'whole_loan', 'repayment_type', 'security_taken')
+                 
+                 
+format_factors <- function(factor_list, df){
+                   for (var in factor_list)
+                   {
+                     df[[var]] <- factor(df[[var]])
+                   }
+                   
+                   return(df)
+}
+loanbook <- format_factors(factor_list, loanbook)
+```
+
+```{r fn sample from loanbook}
+
+sample_port_fc <- function(sim_invest, company_no, risk_cat=NA, portfoli_weight=NA, years=NA, df)
+{
+  if (is.na(years))
+  {
+    years <- year(df$loan_accepted_date) %>% unique
+  }
+  
+  if(is.na(risk_cat))
+  {
+    risk_cat  <- df$credit_band %>% levels
+  }
+  
+  
+  ## Need to code to accept weights
+  if(is.na(portfoli_weight))
+  {
+    sample_portfolio <- 1:sim_invest %>%  map_df( function(x) {
+      tmp <- df %>% sample_n(company_no, replace=FALSE) %>% mutate(sim=x)
+    })
+  }
+  
+  ## Adjust portfolio for fees and scale
+  sample_portfolio <- sample_portfolio %>% mutate(adj_int_rate = 100 + interest_rate - 1)
+  
+  ## For default loans count amount repayed
+  sample_portfolio <- sample_portfolio %>% mutate(adj_int_rate = ifelse(status %in% 'loan: defaulted', (principal_remaining + recoveries)/loan_amount, adj_int_rate))
+ 
+  return(sample_portfolio) 
+}
+  
+
+```
+
+```{r sample from loanbook}
+## Sim invest
+sim_invest <- 10
+
+## No. of companies invested in
+company_no <- c(10, 20, 30, 40, 60, 80, 100, 120, 140, 160, 200, 250, 300, 350, 400, 500)
+
+## Define categories to sample from - if NA all categories
+risk_cat <- c('A+', 'A', 'B', 'C', 'D', 'E')
+
+## How to weight portfolio - if NA then random sample regardless of risk category, else needs to be a vector summing to 1 and the length of risk category
+portfolio_weight <- NA
+
+## Years loans orginated from - if NA then all years
+years <- NA
+```
+
+```{r run sampling for random risk portfolio}
+sim_sample_portfolio <- company_no %>% map_df(function(x) sample_port_fc(sim_invest, x, df=loanbook) %>% mutate(`loans invested in`=x))
+  
+sim_sample_portfolio %>% 
+          group_by(`loans invested in`, sim) %>% 
+              summarise(`avg. interest rate`=mean(adj_int_rate)-100) %>% 
+                ggplot(aes(x=`loans invested in`, y=`avg. interest rate`)) +
+                    geom_line(aes(y=mean(`avg. interest rate`))) +
+                    geom_ribbon(aes(ymin=mean(`avg. interest rate`) - 2* sd(`avg. interest rate`)/length(`avg. interest rate`),ymax=mean(`avg. interest rate`) + 2* sd(`avg. interest rate`)/length(`avg. interest rate`),alpha=0.3))
+  
+```
+This blog series will be bi-weekly, please comment with suggestions of topics. The code for this post can be found at the [Github repo](https://github.com/clapping-bunny/funding_circle)
