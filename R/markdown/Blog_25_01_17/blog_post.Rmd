@@ -1,8 +1,9 @@
---
-title: "Visualising the funding circle loanbook"
+---
+title: "Estimating the risk of bad debt in the funding circle loanbook"
 output:
   html_document:
     keep_md: true
+  html_notebook: default
 ---
 
 
@@ -10,23 +11,30 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-We are again looking at the the peer to peer loan (P2P) book for funding circle (FC), with the focus being the variation in return based on portfolio composition and diversification. FC states that the average return on investment is [7.1%](https://www.fundingcircle.com/uk/statistics/),  with 93% of investors that invested in more than 100 companies, with a maximum exposure of 1% earning 5% or more.  
+We are again looking at the the peer to peer loan (P2P) book for funding circle (FC), with the focus being the variation in return based on portfolio composition and diversification. FC states that the average return on investment is [6.6%](https://www.fundingcircle.com/uk/statistics/),  with 93% of investors that invested in more than 100 companies, with a maximum exposure of 1% earning 5% or more. The original purpose of this blog was to look at various portfolio's and estimate the risk that they carry for the investor. A key component of this is an understanding of the bad debt rate and it's variation over time, which proved more complex to estimate than expected. This post will be looking in detail at various measures of the bad debt rate and raising questions for future posts.
 
+FC states that the average bad debt rate across all risk categories is 1.8% (after bad debt recovery), and that 42% of all defaulted loans are recovered. Across the platform the average risk of default for each risk band is 0.6% for A+ loans,  1.5%	for A loans, 2.3% for B loans, 3.3% for C loans, 5.0% for D loans, and 8.0% for E loans. In order to optimise a portfolio, that both minimises risk and maximises profit a complete understanding of these risk levels is required.
 
-As previously we load the required packages, and the funding circle loan book. 
+FC estimates bad debt rates by taking the actual bad debt rate by loan amount, incorporating the estimated bad debt rate for years that have not matured, and then including the expected recoveries that are expected from each year of origination. Whilst the source of these estimates has not been surfaced it is likely that the estimated bad debt for loans that have not matured is estimated from previous years, whilst the the FC statistics page states that average recoveries are 42% of the defaulted amount. 
+
+To explore these assumptions we start by roughly calculating the bad debt rate, looking solely at the number of loans that defaulted in a given year and comparing this to the total number of loans. This is obviously a flawed approach as it does not account for loan size, repayments, recoveries, or the maturity of the loan. However it represents a crude initial estimate of the default rate in each risk category. This approach yields far higher estimates of bad debt, than those estimated by FC. To account for the variability in loan size we repeat the above steps but this time account for loan size. This approach can further be refined by accounting for loan repayments prior to the loan defaulting. There are multiple approaches to this, the first of which is to adjust for the amount recovered from defaulted loans, another option is to instead estimate the proportion of bad debt from the principal remaining. Finally by looking at the term length of the loan, and the number of repayments made I can estimate the amount of interest payed on a loan and use this to offset the loss made by the loan defaulting. This assumes that interest is payed on the total loan amount as opposed to the amount outstanding (therefore this measure will slightly underestimate the levels of bad debt).
 
 ```{r packages, include=FALSE}
+#install.packages('knitr')
+library(knitr)
+
 #install.packages('tidyverse')
 library(tidyverse)
 
 #install.packages('lubridate')
 library(lubridate)
 
-#install.packages('stargazer')
-library(stargazer)
+#install.packages('pbapply')
+library(pbapply)
+
+#install.packages('pomp')
+library(pomp)
 ```
-
-
 
 ```{r load loanbook, include=FALSE}
 ## File path of loanbook 
@@ -48,69 +56,128 @@ format_factors <- function(factor_list, df){
                    return(df)
 }
 loanbook <- format_factors(factor_list, loanbook)
+
+## relevel risk factors
+loanbook$credit_band <- factor(loanbook$credit_band, levels =c('A+ (Very low risk)', 'A (Low risk)', 'B (Below average risk)', 'C (Average risk)', 'D', 'E'))
 ```
 
-```{r fn sample from loanbook}
-
-sample_port_fc <- function(sim_invest, company_no, risk_cat=NA, portfoli_weight=NA, years=NA, df)
+```{r estimating bad debt, echo = FALSE, warnings=FALSE}
+bad_debt_rate <- function(df)
 {
-  if (is.na(years))
-  {
-    years <- year(df$loan_accepted_date) %>% unique
-  }
   
-  if(is.na(risk_cat))
-  {
-    risk_cat  <- df$credit_band %>% levels
-  }
-  
-  
-  ## Need to code to accept weights
-  if(is.na(portfoli_weight))
-  {
-    sample_portfolio <- 1:sim_invest %>%  map_df( function(x) {
-      tmp <- df %>% sample_n(company_no, replace=FALSE) %>% mutate(sim=x)
-    })
-  }
-  
-  ## Adjust portfolio for fees and scale
-  sample_portfolio <- sample_portfolio %>% mutate(adj_int_rate = 100 + interest_rate - 1)
-  
-  ## For default loans count amount repayed
-  sample_portfolio <- sample_portfolio %>% mutate(adj_int_rate = ifelse(status %in% 'loan: defaulted', (principal_remaining + recoveries)/loan_amount, adj_int_rate))
- 
-  return(sample_portfolio) 
+df <- df %>% mutate(loan_interest_payed=(term - payments_remaining)*interest_rate*loan_amount/(100*12))
+
+  ## Filter bad debts
+df %>% 
+      mutate(year=floor_date(loan_accepted_date, 'year')) -> df
+## Basic estimate of default  
+df %>% 
+  count(year, status) %>%
+    group_by(year) %>% 
+      mutate(`Bad debt`=n/sum(n)*100) -> df_basic_tb_est
+
+## Risk of default accounting for loan size etc
+df %>%
+  group_by(status, year) %>% 
+      summarise(total_loan_amount=sum(loan_amount), total_recov = sum(recoveries), total_princ_remaining = sum(principal_remaining), total_interest_payed=sum(loan_interest_payed)) %>%
+        ungroup() %>%
+            group_by(year) %>% 
+                mutate(`Bad debt by loan size`=total_loan_amount/sum(total_loan_amount)*100, `Bad debt adjusted by recoveries` = (total_loan_amount - total_recov)/sum(total_loan_amount)*100, `Bad debt adjusted for principal remaining`= total_princ_remaining/sum(total_loan_amount)*100, `Bad debt adjusted for loan repayment and principal remaining` = (total_princ_remaining - total_interest_payed)/sum(total_loan_amount)*100 ) -> df
+
+df <- df %>% left_join(df_basic_tb_est, by=c('year', 'status')) %>% select(-n, everything()) %>% mutate(Year=year(year))
+  return(df)
 }
-  
-
 ```
 
-```{r sample from loanbook}
-## Sim invest
-sim_invest <- 10
+```{r estimate_loanbook_bad_debit, fig.cap = 'Estimated bad debt by year, using various methodologies', echo=FALSE, warnings=FALSE, message=FALSE}
+loanbook %>% 
+  bad_debt_rate %>% 
+       filter(status %in% 'loan: defaulted', Year > 2010 ) %>% 
+        gather(key=`Bad debt measurement`, values=c(`Bad debt`, `Bad debt by loan size`, `Bad debt adjusted by recoveries`, `Bad debt adjusted for principal remaining`, `Bad debt adjusted for loan repayment and principal remaining`)) %>% 
+            mutate(`Bad debt rate` = value) %>%
+              select(Year, `Bad debt rate`, `Bad debt measurement`) -> est_bad_debt
+est_bad_debt$`Bad debt measurement` <- factor(est_bad_debt$`Bad debt measurement`, levels = c('Bad debt', 'Bad debt by loan size', 'Bad debt adjusted by recoveries', 'Bad debt adjusted for principal remaining', 'Bad debt adjusted for loan repayment and principal remaining'))
 
-## No. of companies invested in
-company_no <- c(10, 20, 30, 40, 60, 80, 100, 120, 140, 160, 200, 250, 300, 350, 400, 500)
+est_bad_debt %>% 
+               ggplot(aes(x=Year, y=`Bad debt rate`, fill=`Bad debt measurement`)) + 
+                 geom_bar(stat='identity', position='dodge') +
+                   theme(legend.position = 'bottom', legend.direction = 'vertical') -> p1
 
-## Define categories to sample from - if NA all categories
-risk_cat <- c('A+', 'A', 'B', 'C', 'D', 'E')
-
-## How to weight portfolio - if NA then random sample regardless of risk category, else needs to be a vector summing to 1 and the length of risk category
-portfolio_weight <- NA
-
-## Years loans orginated from - if NA then all years
-years <- NA
+p1
 ```
 
-```{r run sampling for random risk portfolio}
-sim_sample_portfolio <- company_no %>% map_df(function(x) sample_port_fc(sim_invest, x, df=loanbook) %>% mutate(`loans invested in`=x))
-  
-sim_sample_portfolio %>% 
-          group_by(`loans invested in`, sim) %>% 
-              summarise(`avg. interest rate`=mean(adj_int_rate)-100) %>% 
-                ggplot(aes(x=`loans invested in`, y=`avg. interest rate`)) +
-                    geom_line(aes(y=mean(`avg. interest rate`))) +
-                    geom_ribbon(aes(ymin=mean(`avg. interest rate`) - 2* sd(`avg. interest rate`)/length(`avg. interest rate`),ymax=mean(`avg. interest rate`) + 2* sd(`avg. interest rate`)/length(`avg. interest rate`),alpha=0.3))
-  
+```{r, tab risk, echo=FALSE}
+kable(est_bad_debt[,-1] %>% spread(key = `Bad debt measurement`, value = `Bad debt rate`) %>% round(digits=1), caption = 'Bad debt by year, using a simple proportion of loans, by total loan values, after adjusting for recoveries, after adjusting for the principal remaining, and after adjusting for both the principal remaining, and interest payed')
 ```
+
+
+Using this approach we find higher estimates for bad debt using every approach than that estimated by funding circle, this may be due to the differing approaches used or from user error! Reassuringly the most complex approach, that includes the interest payed on loans and the amount payed of the principal gives the closest estimates to those given by funding circle. I have made no adjustments for loans that have not matured, so decreasing bad debt overtime does not necessarily indicate a trend. I have also not accounted for future recoveries by FC which may substantially reduce the proportion of bad debt. 
+
+
+To investigate this further I have estimated the bad debt rate for each risk category using all the approaches discussed above. As can be seen below this yields estimates of bad debt that are greater than those estimated by FC, interestingly this is not true for E risk loans, indicating that year of loan origination may be a factor (as E loans are the most recently offered).
+
+```{r estimate_total_loanbook_bad_risk_year, echo=FALSE, warning = FALSE}
+unique(loanbook$credit_band) %>% 
+    map_df(function(x, df=loanbook){
+      filter(df, credit_band %in% x) %>% 
+         bad_debt_rate %>% 
+    filter(status %in% 'loan: defaulted', year(year) > 2010 ) %>% 
+        gather(key=`Bad debt measurement`, values=c(`Bad debt`, `Bad debt by loan size`, `Bad debt adjusted by recoveries`, `Bad debt adjusted for principal remaining`, `Bad debt adjusted for loan repayment and principal remaining`)) %>% 
+            mutate(`Bad debt rate` = value, `Risk band`=x) -> df
+      
+df$`Bad debt measurement` <- factor(df$`Bad debt measurement`, levels = c('Bad debt', 'Bad debt by loan size', 'Bad debt adjusted by recoveries', 'Bad debt adjusted for principal remaining', 'Bad debt adjusted for loan repayment and principal remaining'))
+
+return(df)
+    }) -> est_bad_rate_year
+```
+
+```{r est_bad_rate_risk, echo=FALSE}
+est_bad_rate_year %>% 
+        group_by(`Risk band`, `Bad debt measurement`) %>% 
+            summarise(`Bad debt rate` =mean(`Bad debt rate`)) -> est_bad_rate_year_sum
+
+est_bad_rate_year_sum %>% 
+        ggplot(aes(x=`Risk band`, y=`Bad debt rate`, fill=`Bad debt measurement`)) + 
+         geom_bar(stat='identity', position='dodge') +
+      theme(legend.position = 'bottom', legend.direction = 'vertical')
+```
+
+Now focussing on just using most complex model for bad debt, we see that early investors suffered from poor risk categorisation by funding circle with high default rates across all risk bands. This indicates that holding newly introduced products to term may result in higher than expected loses, although cash back programs may compensate. Bad debt then stabilises indicating successful classification of loans into credit bands. However, these estimates are still higher than those estimated by funding circle, though this maybe due to the exclusion of future recoveries from my estimation model.
+
+```{r est_bad_rate_risk_year, echo=FALSE, results='asis'}
+est_bad_rate_year %>% 
+    filter(`Bad debt measurement` %in% 'Bad debt adjusted for loan repayment and principal remaining') %>% 
+        ggplot(aes(x=Year, y=`Bad debt rate`)) + 
+         geom_bar(stat='identity', position='dodge') +
+            facet_wrap(~`Risk band`) 
+
+
+filter_bad_debt_year_rate <- est_bad_rate_year[,-(1:2)] %>% select(Year, `Risk band`,  `Bad debt rate`, `Bad debt measurement`) 
+
+table_rate_per_year <-  unique(filter_bad_debt_year_rate$`Risk band`) %>% map(function(x){
+    filter_bad_debt_year_rate %>% 
+      filter(`Risk band` %in% x) %>% 
+            select(-`Risk band`) %>% 
+               spread(key = `Bad debt measurement`, value = `Bad debt rate`) %>% 
+                  round(digits=1) -> df
+  return(df)
+})
+
+for(i in 1:length(unique(filter_bad_debt_year_rate$`Risk band`)))
+{
+  print(kable(table_rate_per_year[[i]], caption = paste0('Bad debt by year for ', unique(filter_bad_debt_year_rate$`Risk band`)[i], ' loans')))
+}
+```
+
+
+In future blogs I will be further exploring loan risk further and attempting to investigate investor risk in a variety of portfolio structures. I am particularly interested in exploring the default rate of loans over time, as increasing risk may indicate some beneficial strategies. Let me know if you have any blog ideas, some potential areas are: 
+
+1. Adding estimated default for newly acquired loans, coupled with a range of scenarios for loan recoveries
+1. Loan default risk over the loan period
+1. Comparison of property interest only loans to an ordinary FC loan
+1. The trade off between loan length and interest rates
+1. Portfolio structure.
+
+Unfortunately future analysis may be limited by the limited dataset released by FC, as key dates are not including in the public loan book. Hopefully if there is sufficient pressure more data will be released.
+
 This blog series will be bi-weekly, please comment with suggestions of topics. The code for this post can be found at the [Github repo](https://github.com/clapping-bunny/funding_circle)

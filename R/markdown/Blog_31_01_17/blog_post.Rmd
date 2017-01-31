@@ -1,0 +1,79 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+1. Estimate the effect on returns of various portfolio compositions
+1. Repeat with individual loan failure and estimate returns
+1. Next blog looking at property loans and there return over time compared to standard loans.
+
+```{r fn sample from loanbook}
+
+sample_port_fc <- function(sim_invest, company_no, risk_cat=NA, portfoli_weight=NA, years=NA, df)
+{
+  if (is.na(years))
+  {
+    years <- year(df$loan_accepted_date) %>% unique
+  }
+  
+  if(is.na(risk_cat))
+  {
+    risk_cat  <- df$credit_band %>% levels
+  }
+  
+  
+  ## Need to code to accept weights
+  if(is.na(portfoli_weight))
+  {
+    sample_portfolio <- 1:sim_invest %>%  map_df( function(x) {
+      tmp <- df %>% sample_n(company_no, replace=FALSE) %>% mutate(sim=x)
+    })
+  }
+  
+  ## Adjust portfolio for fees and scale
+  sample_portfolio <- sample_portfolio %>% mutate(adj_int_rate = 100 + interest_rate - 1)
+  
+  ## For default loans count amount repayed
+  sample_portfolio <- sample_portfolio %>% mutate(adj_int_rate = ifelse(status %in% 'loan: defaulted', (loan_amount*(term-payments_remaining)-principal_remaining)/loan_amount, adj_int_rate))
+ 
+  return(sample_portfolio) 
+}
+  
+
+```
+
+```{r sample from loanbook}
+## no. of portfolio's
+sample_portfolio <- 1000
+
+## Sim invest - per portfolio, avg for accuracy
+sim_invest <- 10
+
+## Max portfolio size
+max_port_size <- 800
+min_port_size <- 10
+## No. of companies invested in
+company_no <-  runif(sample_portfolio, min_port_size, max_port_size) %>% round(digits=0)
+
+## Define categories to sample from - if NA all categories
+risk_cat <- c('A+', 'A', 'B', 'C', 'D', 'E')
+
+## How to weight portfolio - if NA then random sample regardless of risk category, else needs to be a vector summing to 1 and the length of risk category
+portfolio_weight <- NA
+
+## Years loans orginated from - if NA then all years
+years <- NA
+```
+
+```{r run sampling for random risk portfolio}
+bake(file='sample_portfolio.rds', {
+  sim_sample_portfolio <- company_no %>% pblapply(function(x) sample_port_fc(sim_invest, x, df=loanbook) %>% mutate(`loans invested in`=x), cl=4) %>% bind_rows
+}) -> sim_sample_portfolio
+
+sim_sample_portfolio %>% 
+          group_by(`loans invested in`, sim) %>% 
+              summarise(`avg. interest rate`=mean(adj_int_rate)-100) %>% 
+                ggplot(aes(x=`loans invested in`, y=`avg. interest rate`)) +
+                    geom_point()
+  
+```
