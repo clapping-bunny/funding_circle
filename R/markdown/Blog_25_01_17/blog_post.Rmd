@@ -59,6 +59,9 @@ loanbook <- format_factors(factor_list, loanbook)
 
 ## relevel risk factors
 loanbook$credit_band <- factor(loanbook$credit_band, levels =c('A+ (Very low risk)', 'A (Low risk)', 'B (Below average risk)', 'C (Average risk)', 'D', 'E'))
+
+## rerun filtering for only guaranteed loans
+loanbook <- loanbook %>% filter(loan_guaranteed == 1) 
 ```
 
 ```{r estimating bad debt, echo = FALSE, warnings=FALSE}
